@@ -1,52 +1,58 @@
-CASE_PATH = r"C:\Users\wyatt\OneDrive - Texas A&M University\PhD Research\Stability Project\Cases\Hawaii\Hawaii40_20231026.pwb"
+CASE_PATH = r"C:\Users\wyatt\Documents\Power World\Cases\Hawaii\Hawaii40_20231026.pwb"
 
 #Imports
 from gridworkbench import GridWorkbench
-from pw_io import TransientStabilityIO
-from pw_io import Transient
-from pw_io import GridRange
-from pw_io import GridConditions
-import matplotlib.pyplot as plt
+from pw_io import *
 
 #Grid Work Bench - Handles ESA Connection
 wb = GridWorkbench()
 wb.open_pwb(CASE_PATH)
 
-#Transient Object
-tIO = TransientStabilityIO(wb.esa)
-tCTGS = tIO.getAllCTG()
+# PW Transient Interface
+tIO   = TransientStabilityIO(wb.esa)
 
-#Ranged Varaibles
-baseLoad = GridRange(range = [1.4, 4.8], steps = 2)
-rampRate = GridRange(range = [0.01, 0.2], steps = 12)
-ctgs 	 = GridRange([tCTGS[5]])
+# Grid Modifications
+conditions = {
+    BaseLoad	: trange(0.9, 1.9, n=30),
+    Contingency	: tIO.getAllCTG()#All
+}
 
-#Grid Behavior
-conditions = (GridConditions() 
-			.baseLoad(1)
-			.loadRampRate(0)
-            .contingencies(tCTGS[0]))
+# Solve Transients With Conditions
+ts = tIO.runtime(5)						\
+		.view("Bus", 31, "TSBusVPU")	\
+		.solve(conditions)				\
 
-#Configure TS Event
-#Func to set time of simulation (conditional/determiend)
-tIO.focus(*["Bus '" + str(i) + "'" for i in range(2,15)])  	\
-   .fields("TSBusVPU")
-
-# Solve
-ts = tIO.solve(conditions)
-	
-# Display	
-Transient.plotOverlay(ts)
-plt.show()
-#a = Transient.animation(ts)
-#plt.show()
+#Animation 1
+animConfig = {
+    "Frames":{
+        "Key": Contingency,
+        "FPS": 3
+	},
+    "ColorBar": {
+        "Key"  : BaseLoad,
+        "Range": (1,2)
+	},
+    "Path": r"C:\Users\wyatt\Documents\Result1.gif"
+}
+ts.animate(animConfig)
 
 #Close PW
 wb.close_pwb()
 
-# Save
-#filePath = r"C:\Users\wyatt\OneDrive - Texas A&M University\PhD Research\Stability Project\Visuals\anim.gif"
-#Transient.saveAnimation(a, filePath)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 '''
