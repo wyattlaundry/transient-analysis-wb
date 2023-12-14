@@ -1,12 +1,23 @@
 
 import matplotlib.pyplot 	as plt
 import matplotlib.animation as animation
+import matplotlib 			as mpl
 import numpy 				as np
 import pandas 				as pd
-from esa import SAW 					
 
-from itertools import product
+from abc 		import ABC, abstractmethod
+from esa 		import SAW, CommandNotRespectedError				
+from itertools 	import product, groupby
 
+#Helper Functions
+
+#tRange
+#Returns list of equally n equally spaces values inclusive over min max
+def trange(min, max, n):
+	res = (max-min)/(n-1)
+	return np.arange(min, max+res, res)
+
+# A singular action inside a contingency
 class TSContingencyEvent:
 
 	def __init__(self, event):
@@ -18,7 +29,7 @@ class TSContingencyEvent:
 	def __str__(self) -> str:
 		return f"({self.object}, {self.event}, T={self.time})"
 
-#Does not implement CTG Elements yet, but it is in class
+#Represents data for contingency
 class TSContingency:
 
 	def __init__(self, ctg_record, ctg_elem_records):
@@ -30,10 +41,22 @@ class TSContingency:
 
 	def __str__(self) -> str:
 		return self.name
-		#return f"TS Contingency Name: {self.label}\n" + "\n".join([ " --> " + str(e) for e in self.events])
 	
 	def __repr__(self):
-		return f"{self.name} ({len(self.ctg_events)} Events)"
+		return self.name
+	
+	def __lt__(self, other): 
+		return self.name < other.name
+	def __gt__(self, other): 
+		return self.name > other.name
+	def __le__(self, other): 
+		return self.name <= other.name
+	def __ge__(self, other): 
+		return self.name >= other.name
+	def __eq__(self, other): 
+		return self.name == other.name
+	def __ne__(self, other): 
+		return self.name != other.name
 	
 	def getName(self):
 		return self.name
@@ -50,72 +73,175 @@ class TSContingency:
 	#Number of Events
 	def getNumEvents(self):
 		return len(self.events)
-
-# Transient Simulation Results Class for many tasks
-# Parameters: 
-# - Transient Data (Generic, N Dimensional)
-class Transient:
-
-	def __init__(self, data):
-		self.data = data
-
-	def __str__(self):
-		return self.data[1].to_string()
 	
-	#TO-DO: Parameterize which field to animate over
-	# e.g. Time Varying Frames, Load Varying Frames, etc
-	@staticmethod
-	def animation(transients, fps = 5):
-		fig = plt.figure()
+#Transient Helper Class to assist in plotting/analysis
+#Contains list of transients
+class TransientSet:
 
-		def frames(i):
-			plt.clf()
-			return Transient.plot(transients[i]) 
+	#Create Transient Set with a list of Transient Objects
+	def __init__(self, transients):
+
+		#Transient Data
+		self.transients = list(transients)
+		
+		#Default Plot Colors
+		for transient in self.transients:
+			transient.setColor('b')
+
+
+	#Returns number of frames
+	def numFrames(self):
+		return len(self.frameGroups[1])
+	
+	#For any given frame (should I make this frame-independent?) define color of a transient by a param
+	# To-DO Call again if frameBy called after this??? only applies to non-range
+	def colorBy(self, param, range=None):
+
+		#Save param to assist in plotting
+		self.colorParam = param
+
+		#Set Global Color Map
+		self.cmap = mpl.colormaps.get_cmap('cool')
+
+		#Returns value in [0, 1] based on above ranges- Scalars Only
+		def tColor(value):
+			scaled = (value-min(self.cbMin, self.cbMax))/abs(self.cbMax-self.cbMin)
+			clamped = max(min(1, scaled), 0)
+			return self.cmap(clamped)
+		
+		if range: #Param should be numeric if range passed
+
+			#Order matters
+			self.cbMin = range[0]  # First element
+			self.cbMax = range[-1] # Last Element
+
+			#Color by Val if scalar
+			for transient in self.transients:
+				transient.setColor(tColor(transient.condition[param]))
 			
-		a = animation.FuncAnimation(fig, frames, frames=len(transients), interval=1000/fps)
-		return a
+		else: #Color by frame no range
 
-	@staticmethod
-	def saveAnimation(anim, filePath, fps=5):
+			#For each frame
+			for frameTransients in self.frameGroups[1]:
+
+				#Linear Color scheme
+				colors = [self.cmap(i) for i in np.linspace(0, 1, len(frameTransients))]
+				for i, transient in enumerate(frameTransients):
+					transient.setColor(colors[i])
+		
+	#Returns a list of keys and respective transient lists
+	def group(self, rootParam):
+
+		#Group keys and group lists
+		groupKeys = []
+		tGroups   = []
+
+		#Returns Transient object by its desired parameter value
+		def p(transient):
+			return transient.condition[rootParam]
+
+		#For each group, add the key and the list
+		for k, g in groupby(sorted(self.transients, key=p), key=p):
+			
+			groupKeys.append(k)
+			tGroups.append(list(g)) 
+
+		return groupKeys, tGroups
+	
+	#Accessed by animation function
+	def frames(self, i):
+
+		#Clear last frame
+		self.ax.clear()
+
+		#Per-Frame Transient Data
+		transients = self.frameGroups[1][i] # Transient Object List
+		frameParamValue = self.frameGroups[0][i] #Value Unique to frame
+
+		#Frame Sub-Title
+		self.ax.set_title(self.frameParam.toStr() + ": " + r"$\bf{" + str(frameParamValue) + "}$" , 
+					loc="left",
+					fontsize=9)
+		
+		#Axis Titles - NEED ACCESS TO REQESTED FIELDS
+		self.ax.set(xlabel="Time (s)", ylabel=f"Bus Voltage p.u.")
+		
+		#Plot all onto this frame
+		for transient in transients:
+			transient.plot(self.fig, self.ax)
+
+		return (self.fig, self.ax)
+	
+	#Static Helper function to animate transient related data
+	def animate(self, config):
+
+		#Generate frames by parameter
+		self.frameGroups = self.group(config["Frames"]["Key"])
+		self.frameParam  = config["Frames"]["Key"]
+		fps = config["Frames"]["FPS"]
+
+		#Save Location
+		filePath = config["Path"]
+
+		#Blank plot
+		fig, ax = plt.subplots()
+
+		#Construct CB 
+		if (c_key := config["ColorBar"]["Key"]) and (c_rng:= config["ColorBar"]["Range"]):
+
+			#Color config
+			self.colorBy(c_key, c_rng)
+
+			#CB Object
+			cb = fig.colorbar(	mpl.cm.ScalarMappable(norm=mpl.colors.Normalize(self.cbMin, self.cbMax), cmap=self.cmap),
+								ax=ax, 
+								orientation='vertical', 
+								label=c_key.toStr())
+			
+			#Flip if passed values in reverse order
+			if self.cbMin > self.cbMax:
+				cb.ax.invert_yaxis()
+			
+		#Make Animation
+		self.fig = fig
+		self.ax = ax
+		anim = animation.FuncAnimation(fig, self.frames, frames=self.numFrames(), interval=1000/fps)
+		
+		#Save Animation
 		writergif = animation.PillowWriter(fps) 
 		anim.save(filePath, writer=writergif)
 
-	def stableRef(self, mw):
-		self.nr_ref = mw
+# Class Representing dat aof a single Transient Simulation
+# Fields:
+# - Sim Data
+# - Grid Conditions During Sim
+class Transient:
 
-	@staticmethod
-	# Super-Imposes the grid range over one plot, colored by different states
-	def plotOverlay(transients):
+	#Transient Data and the Grid Conditions it was performemd on
+	def __init__(self, data, condition):
+		self.data = data
+		self.condition = condition
+		self.plotColor = 'b'
 
-		cmap = plt.get_cmap('gnuplot')
-		colors = [cmap(i) for i in np.linspace(0, 1, len(transients))]
+	#String representation: output pandas table
+	def __str__(self):
+		return self.data[1].to_string()
+	
+	def setColor(self, color):
+		self.plotColor = color
 
-		for color, transient in zip(colors,transients):
-			Transient.plot(transient, color)
-
-
-
-	# Plot Transient Set
-	# --> N Objects, 1 Field (for now)
-	@staticmethod
-	def plot(transient, color=None):
-
-		#Only support 1 for now
-		if isinstance(transient, list):
-			transient = transient[0]
+	# Plot Transient Set (basic, just gets values on screen. TGroup handlees varaiations)
+	def plot(self, fig=None, ax=None):
 
 		#Get List of Series Names Excluding Sys Load MW
-		meta 		= transient.data[0]
+		meta 		= self.data[0]
 		sysMeta 	= meta.loc[meta["ObjectType"]=="Case Information"]
 		seriesMeta 	= meta.loc[meta["ObjectType"]!="Case Information"]
 
-		print(transient.data[1])
-		print(sysMeta)
-
 		#Extract Data
-		time 		= transient.data[1]["time"]
-		sysData 	= transient.data[1][sysMeta.index]
-		seriesData 	= transient.data[1][seriesMeta.index]
+		time 		= self.data[1]["time"]
+		sysData 	= self.data[1][sysMeta.index]
+		seriesData 	= self.data[1][seriesMeta.index]
 
 		#For On-Screen Legend
 		sysNames 	= list(sysMeta["ColHeader"])
@@ -127,93 +253,86 @@ class Transient:
 		# Assumes Series Data Homogenous
 		fields = seriesMeta["ColHeader"].unique()
 
-		#If Color Specified
-		if color is not None:
-			plt.plot(time, seriesData, color=color)
-		else:
-			plt.plot(time, seriesData)
+		if fig == None:
+			fig, ax = plt.subplots()
 
-		plt.title("Transient Simulation")
-		plt.xlabel("Time (s)")
-		plt.ylabel(fields[0]) #Assume 1 Data Type
-		plt.ylim(0.3,1.2)
-		plt.xlim(time.min(), time.max())
-
-		#Stable Ref
-		'''		
-		if self.nr_ref is not None:
-			t = 0
-			time_l =  list(reqData["time"])
-			for i in range(len(time_l)):
-				if self.nr_ref > self.loadData[0] + self.loadData[1]*time_l[i]:
-					t = time_l[i]
-				else:
-					break
-			plt.plotvline(x = t, color = 'b')
-		'''
-	
-
-#Range of states - Abstract
-class GridRange:
-
-	def __init__(self, range, steps=None):
-
-		#If Steps given, assumed numeric range
-		if steps is not None:
-			min = range[0]
-			max = range[1]
-			res = (max-min)/steps
-			self._states = np.arange(min, max+res, res)
-			self._seqLen = steps
-		#Otherwise, a list of pre-determiend values
-		else:
-			self._states = range
-			self._seqLen = len(range)
-
-		self._seqNum = 0
-	
-	def __str__(self) -> str:
-
-		s = f"GridRange ({self._seqLen} Combinations):\n"
-		for state in self._states:
-			s += str(state) + "\n"
-
-		return s
-	
-	def __len__(self):
-		return self._seqLen
-
-	def __iter__(self):
-		self._seqNum = 0
-		return self
-	
-	def __next__(self):
-
-		#Check if Survey Complete
-		if self._seqNum == self._seqLen:
-			raise StopIteration
+		#Plot with Specified Color
+		ax.plot(time, seriesData, color=self.plotColor)
 		
-		#Get State of current iteration
-		state = self._states[self._seqNum]
+		#Plot Options
+		fig.suptitle("Transient Simulation", fontsize=14, fontweight='bold')
+		ax.set_ylim(0.3,1.2)
+		ax.set_xlim(time.min(), time.max())
 
-		#Advance State & Return State
-		self._seqNum += 1
-		return state
-	
+class Condition(ABC):
+
+	@property
+	@abstractmethod
+	def default():
+		pass
+
 	@staticmethod
-	def validate(o):
-		if isinstance(o, GridRange):
-			return o
-		elif isinstance(o, list):
-			return GridRange(o)
-		else:
-			return GridRange([o])
-		
+	@abstractmethod
+	def toStr():
+		pass
 
-# Survey  Implementations:
-# - System-Load  MW (Load Mult)
+	@staticmethod
+	@abstractmethod
+	#Target condition config is passed, including this condition!
+	def apply(esa, conditions):
+		pass
+
+class Contingency(Condition):
+
+	default = ["SimOnly"]
+
+	def toStr():
+		return "Contingency"
+
+	def apply(esa, conditions):
+		pass
+
+class BaseLoad(Condition):
+
+	default = [1]
+
+	def toStr():
+		return "Base Load MW Mult"
+
+	def apply(esa, conditions):
+
+		baseLoad = conditions[BaseLoad]
+
+		esa.change_and_confirm_params_multiple_element(
+			ObjectType = 'Zone',
+			command_df = pd.DataFrame({'ZoneNum': [1], 'SchedValue': [baseLoad]})
+		)
+
+class RampRate(Condition):
+
+	default = [0]
+
+	def toStr():
+		return "Ramp Rate"
+
+	def apply(esa, conditions):
+
+		rate = conditions[RampRate]
+
+		# At T=0, LoadMult MUST be 1 for DSTimeSched
+		sched = "WB_SCHED"
+		time = 1000
+		endLF = 1 + rate*time # Rate = Increase of load by (% of BaseLoad) per second
+		data = {'DSTimeSchedName': [sched, sched], 'DSTimeSchedTime': [0, time], 'DSTimeSchedValue': [1, endLF]}
+		data = pd.DataFrame(data)
+		esa.change_and_confirm_params_multiple_element(
+			ObjectType='DSTimeScheduleTimePoint',
+			command_df=data
+		)
+
+# Conditions to Implement:
 # - Zone-Load Differential MW (Zones w/ High Load difference)
-# - P/Q Ratio
+# - Load P/Q Ratio
 # - Bus Shunts (G/Cap/Reactor)
 # - Injection Groups
 # - IBR % (Ratio of IBR to SG)
@@ -223,45 +342,51 @@ class GridRange:
 # Advanced Survey Implementations:
 # - Alterntaive Grid Topologies
 # - Control System Parameters
-class GridConditions:
+class GridIterator:
 
-	def __init__(self):
+	conditionOptions =  {
+		Contingency	: Contingency.default,
+		BaseLoad	: BaseLoad.default,
+		RampRate	: RampRate.default #'step size' next
+	}
+
+	def __init__(self, conditions, esa):
+
+		#Add Condition if only valid Condition type
+		for condition, value in conditions.items():
+			if type(condition) is type(Condition):
+				self.conditionOptions[condition] = self.__toIter(value)
 
 		#Action Exists Without ESA until owned by another object
-		self.esa = None
-
-		#Built-In Configurable Grid Option Format
-		# "Option Name": [Default Value, Implementation Function]
-		self._options = {
-			"Contingency": 
-			[
-				["SimOnly"],
-				lambda *args: None
-			],
-			"Base Load":
-			[
-				[1],
-				self.__configBaseLoad
-			],
-			"Ramp Rate":
-			[
-				[0],
-				self.__configRampRate
-			]
-		}
-
-		#Storage for custom ones
-		self._custom_funcs = []
-
-	# ESA object passed when survey called
-	def __call__(self, esa):
 		self.esa = esa
-		return self
 	
 	# Enter with ESA Object
 	def __enter__(self):
-		self.esa.SaveState()
-		#NEED TO SET LOAD ZONE LOADPMW to save on transients
+
+		# Save pre-simulation state so it can be restored if anything goes wrong
+		if not self.esa.SaveState():
+			print("Case backup saved for restoration.")
+		else:
+			print("Failed to save case state. Investigate before continuing.")
+
+		# Create 'SimOnly' contingency if it does not exist
+		try:
+			self.esa.change_and_confirm_params_multiple_element(
+				ObjectType = 'TSContingency',
+				command_df = pd.DataFrame({'TSCTGName': ['SimOnly']})#, 'SchedValue': [baseLoad]})
+			)
+		except(CommandNotRespectedError):
+			print("Failure to create 'SimOnly' Contingency")
+		else:
+			print("Contingency 'SimOnly' Initialized")
+
+		#TSGetVCurveData("FileName", filter);This field comapres to QV curve!
+
+		#TSRunResultAnalyzer PW Post-transient analysis
+
+		#Tolerance MVA
+
+		#Need to auto create DSTimeSChedule & LoadCharacteristic for Ramp
 		''' 
 		CREATE Zone Load Characteristic - REturn message if not done
 		load change Will not work without assigning sched to LC
@@ -277,134 +402,131 @@ class GridConditions:
 			command_df=load_char
 		)
 		'''
+		print("Begining Simulations\n")
+
 		return self
 	
 	#Safely Leave PW Case as it was entered - incase 2 sims are run
 	def __exit__(self, type, value, traceback):
+
+		print("Simulations Finished.\n")
+
+		#Revert to original state
+		print("Reverting to original PF state.")
 		self.esa.LoadState() 
+
+		#Disable ram storage for all objects when done
+		print("Disabling RAM Results Storage")
+		self.esa.RunScriptCommand('TSResultStorageSetAll(ALL, NO)')
+
+		# Clear Ram TSClearResultsFromRAM Need to determine how this affets this program before adding
+		# SaveCase() Do I want to commit these changes? Don't know yet
+
 		self.esa = None
 
-	#Actual Ramp Application
-	def __configRampRate(self, rate):
-
-		# At T=0, LoadMult MUST be 1 for DSTimeSched
-		sched = "WB_SCHED"
-		time = 1000
-		endLF = 1 + rate*time # Rate = Increase of load by (% of BaseLoad) per second
-		data = {'DSTimeSchedName': [sched, sched], 'DSTimeSchedTime': [0, time], 'DSTimeSchedValue': [1, endLF]}
-		data = pd.DataFrame(data)
-		self.esa.change_and_confirm_params_multiple_element(
-			ObjectType='DSTimeScheduleTimePoint',
-			command_df=data
-		)
-
-	def __configBaseLoad(self, baseLoad):
-
-		self.esa.change_and_confirm_params_multiple_element(
-			ObjectType = 'Zone',
-			command_df = pd.DataFrame({'ZoneNum': [1], 'SchedValue': [baseLoad]})
-		)
-
-	#Gets possible values for each option
-	def __optionVals(self):
-		for v in self._options.values():
-			yield v[0]
-
-	#Gets function for each option
-	def __optionFuncs(self):
-		for v in self._options.values():
-			yield v[1]
-
 	#Go through passed Grid Sequences and apply  states
-	def apply(self):
+	def applyAll(self):
 
+		#If ESA not passed
 		if not isinstance(self.esa, SAW):
 			raise Exception("ESA not passed to conditional object to be applied.")
 
 		#Apply every possible combination of options given
-		for condition in product(*self.__optionVals()): 
+		for allConditionPerm in product(*self.conditionOptions.values()): 
 
-			print("\nApplying to Power World: ")
-			for option, optionFunc, value in zip(self._options.keys(), self.__optionFuncs(), condition):
-				print(str(option) + " : " + str(value))
-				optionFunc(value)
+			print("Applying to Power World: ")
 
-			yield condition[0] #Relies on internal structue having CTG first
+			scenario = dict(zip(self.conditionOptions.keys(), allConditionPerm))
+			for option, value in scenario.items():
+				print(option.toStr() + " : " + str(value))
+				option.apply(self.esa, scenario)
 
-	# Base Load
-	def baseLoad(self, baseLoad):
-		self._options["Base Load"][0] = GridRange.validate(baseLoad)
-		return self		
+			print()
 
-	#User-Facing Sequence
-	def loadRampRate(self, rate):
-		self._options["Ramp Rate"][0] 	= GridRange.validate(rate)
-		return self
+			yield scenario
 	
-	#Sets Contingencies to do by label name
-	def contingencies(self, ctg):
-		self._options["Contingency"][0] = GridRange.validate(ctg)
-		return self
+	#Forces inputs into iterable since we treat them all as loops
+	def __toIter(self, obj):
+
+		#Checks to see if param is iterable or singular
+		try:
+			iterator = iter(obj)
+		except TypeError:
+			return [obj]
+		else:
+			return obj
 		
 # ESA I/O Class for Transient Simulations
 class TransientStabilityIO:
 
 	def __init__(self, esa):
 
-		#Grid Work Bench Object for IO
+		#PW Interface
 		self.esa = esa
 		
-		#Obj+Field Pair for Results
-		self._objects = set()
-		self._fields = set()
-	
-	#Define Objects of Interest
-	def focus(self, *objects):
-		self._objects = set(objects)
-		return self
-	
-	#Define Fields for Objects (V, Hz, etc.)
-	def fields(self, *objFields):
-		self._fields = set(objFields)
-		return self
-	
-	#Implement PF tolerance to prevent wiggle at start
-	def PFTolerance(self, tol):
-		return self
+		#Sim duration - None -> by Contingency
+		self.__runtime = None
+
+		#Fields to retrieve data from
+		self.targetFields = []
 		
-	# Order a TS Solve through ESA
-	def dispatchTSSolve(self, ctg):
+	# Order a TS Solve through ESA - condtion must be contain single bits
+	def dispatchTSSolve(self, scenario):
 
-		#Produce Obj+Field Retrieval List
-		# Zone '1' | TSLoadP
-		objFieldList = [*self.objFields()]
-
-		#Check Fields existing before trying to solve
-		if len(objFieldList)<=0:
-			raise Exception(f"No (Object,Field) pair in focus.")
+		#Save  fields in RAM during sim
+		for objType in map(lambda x: x["Object"], self.targetFields):
+			self.esa.RunScriptCommand(f'TSResultStorageSetAll({objType}, YES)')
+		
+		#Make PW formatted object field list
+		objFieldList = list(map(
+			lambda o: f"{o['Object']} '{o['ID']}' | {o['Field']}",
+			self.targetFields
+		))
 
 		#Solve through ESA
-		self.esa.RunScriptCommand(f'TSSolve("{ctg}")')
+		if self.__runtime:
+			script = f'TSSolve({scenario[Contingency]}, [0,{self.__runtime}])'
+		else:
+			script = f'TSSolve({scenario[Contingency]})'
+		self.esa.RunScriptCommand(script)
+		
 
 		#Get Specified Data Fields and return Transient DataFrame
-		ts_data = self.esa.TSGetContingencyResults(ctg, objFieldList)
+		ts_data = self.esa.TSGetContingencyResults(scenario[Contingency], objFieldList)
 
-		print(ts_data)
+		return Transient(ts_data, scenario)
 	
-		return Transient(ts_data)
+	#Set Runtime
+	def runtime(self, sec):
+		self.__runtime = sec
+		return self
+	
+	# Add TS parameter to record
+	def view(self, obj, id, field):
 
+		#only one target for now
+		self.targetFields=[{
+			"Object": obj,
+			"ID": id,
+			"Field": field
+		}]
+
+		return self
+	
 	# Run TS for CTG in PW (Heavy-Compute Time)
-	def solve(self, conditions=GridConditions()):
+	def solve(self, conditions={}):
 
-		sol = []
+		#Check Fields existing before trying to apply anything
+		if len(self.targetFields)<=0:
+			raise Exception(f"No (Object,Field) pair in focus.")
 
 		#Solve Over All Conditions, Open Safely
-		with conditions(self.esa):
-			for ctg in conditions.apply():
-				sol.append(self.dispatchTSSolve(ctg)) # Use a co-routine here....
-				
-		print("Simulations Complete")		
-		return sol
+		def compute():
+			with GridIterator(conditions, self.esa) as grid:
+				for scenario in grid.applyAll():
+					yield self.dispatchTSSolve(scenario) # To-Do: Use a co-routine here to plot while computing....
+					
+		return TransientSet(compute())
 
 	# Returns Array of Custom Transient Contingency Objects
 	def getAllCTG(self):
@@ -426,10 +548,4 @@ class TransientStabilityIO:
 		
 		return ctgs
 	
-	# Object + Field Format for ESA
-	def objFields(self):
-
-		for o in self._objects:
-			for f in self._fields:
-				yield o + " | " + f   # Ex --> ["Bus '2' | TSBusVPU"]
 	
